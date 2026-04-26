@@ -11,25 +11,26 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   build:
     name: Build ${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
-            container: debian:trixie
             platform: linux/amd64
+            runner: ubuntu-latest
           - arch: arm64
-            container: vascoguita/raspios:arm64
             platform: linux/arm64
+            runner: ubuntu-24.04-arm
           - arch: armhf
-            container: vascoguita/raspios:armhf
             platform: linux/arm/v7
+            runner: ubuntu-latest
 
     steps:
       - name: Resolve upstream tag
@@ -52,24 +53,28 @@ jobs:
           fetch-depth: 0
 
       - name: Set up QEMU
-        if: matrix.arch != 'amd64'
+        if: matrix.arch == 'armhf'
         uses: docker/setup-qemu-action@v4
         with:
-          platforms: arm,arm64
+          platforms: arm
 
-      - name: Build .deb in ${{ matrix.container }}
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build .deb
         run: |
           docker run --rm \
             --platform ${{ matrix.platform }} \
             -v "$PWD":/workspace -w /workspace \
             -e DEBIAN_FRONTEND=noninteractive \
-            ${{ matrix.container }} \
+            ghcr.io/${{ github.repository_owner }}/odio-mympd-builder:${{ matrix.arch }} \
             bash -c '
               set -e
-              apt-get update
-              apt-get install -y --no-install-recommends sudo ca-certificates
               ./build.sh installdeps
-              apt-get install -y --no-install-recommends dpkg-dev debhelper fakeroot lintian
               ./build.sh pkgdebian
             '
 
