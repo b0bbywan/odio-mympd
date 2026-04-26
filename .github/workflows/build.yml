@@ -1,0 +1,126 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream myMPD tag to build (e.g. v25.0.1)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            container: debian:trixie
+            platform: linux/amd64
+          - arch: arm64
+            container: vascoguita/raspios:arm64
+            platform: linux/arm64
+          - arch: armhf
+            container: vascoguita/raspios:armhf
+            platform: linux/arm/v7
+
+    steps:
+      - name: Resolve upstream tag
+        id: upstream
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.upstream_tag }}"
+          else
+            # Strip prerelease suffix so e.g. v25.0.1-rc1 builds upstream v25.0.1
+            TAG="$(echo '${{ github.ref_name }}' | sed -E 's/-(rc|beta|alpha)[0-9]*$//')"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Local tag: ${{ github.ref_name }} → upstream myMPD: ${TAG}"
+
+      - name: Checkout upstream myMPD
+        uses: actions/checkout@v5
+        with:
+          repository: jcorporation/myMPD
+          ref: ${{ steps.upstream.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        if: matrix.arch != 'amd64'
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm,arm64
+
+      - name: Build .deb in ${{ matrix.container }}
+        run: |
+          docker run --rm \
+            --platform ${{ matrix.platform }} \
+            -v "$PWD":/workspace -w /workspace \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ${{ matrix.container }} \
+            bash -c '
+              set -e
+              apt-get update
+              apt-get install -y --no-install-recommends sudo ca-certificates
+              ./build.sh installdeps
+              apt-get install -y --no-install-recommends dpkg-dev debhelper fakeroot lintian
+              ./build.sh pkgdebian
+            '
+
+      - name: Collect package
+        run: |
+          mkdir -p dist
+          cp package/mympd*_${{ matrix.arch }}.deb dist/
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: mympd-${{ matrix.arch }}-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mympd-*-deb
+          merge-multiple: true
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+
+  notify-apt-repo:
+    name: Trigger APT repo update
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Trigger apt-repo rebuild
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.APT_REPO_TOKEN }}
+          repository: b0bbywan/odio-apt-repo
+          event-type: release-published
+          client-payload: '{"repo": "${{ github.repository }}", "tag": "${{ github.ref_name }}"}'
