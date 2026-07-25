@@ -3,6 +3,8 @@ name: Build
 on:
   push:
     tags: ['v*']
+    # Branch pushes exercise the pipeline; the release job is tag-only.
+    branches: ['**']
   workflow_dispatch:
     inputs:
       upstream_tag:
@@ -28,28 +30,32 @@ jobs:
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
+          # platform must match build-images.yml, which publishes
+          # odio-mympd-builder:armhf as arm/v7 only — arm/v6 here fails with "no
+          # matching manifest". It says nothing about the emitted baseline: the
+          # rootfs is Raspberry Pi OS armhf (gcc --with-arch=armv6), hence
+          # expect_cpu_arch below, which is what a base-image swap would break.
           - arch: armhf
             platform: linux/arm/v7
             runner: ubuntu-latest
+            expect_cpu_arch: v6
 
     steps:
+      # Needs no checkout, and must run before the one below replaces the
+      # workspace. Only upstream_tag is used: build.sh sets the package version
+      # from myMPD's changelog.
       - name: Resolve upstream tag
         id: upstream
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.upstream_tag }}"
-          else
-            # Strip prerelease suffix so e.g. v25.0.1-rc1 builds upstream v25.0.1
-            TAG="$(echo '${{ github.ref_name }}' | sed -E 's/-(rc|beta|alpha)[0-9]*$//')"
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Local tag: ${{ github.ref_name }} → upstream myMPD: ${TAG}"
+        uses: b0bbywan/odio-ci/actions/resolve-version@v1.0.3
+        with:
+          upstream_repo: jcorporation/myMPD
+          upstream_tag: ${{ github.event.inputs.upstream_tag }}
 
       - name: Checkout upstream myMPD
         uses: actions/checkout@v5
         with:
           repository: jcorporation/myMPD
-          ref: ${{ steps.upstream.outputs.tag }}
+          ref: ${{ steps.upstream.outputs.upstream_tag }}
           fetch-depth: 0
 
       - name: Set up QEMU
@@ -78,11 +84,32 @@ jobs:
               ./build.sh pkgdebian
             '
 
+      # build.sh emits mympd_* and mympd-dbgsym_*; the debug symbols are not
+      # published. A loop rather than a narrower glob so a future subpackage
+      # shows up in the log instead of vanishing silently.
       - name: Collect package
         run: |
           mkdir -p dist
-          cp package/mympd*_${{ matrix.arch }}.deb dist/
+          for f in package/mympd*_${{ matrix.arch }}.deb; do
+            case "$(basename "$f")" in
+              *-dbgsym_*) echo "skipping $(basename "$f") — debug symbols are not published" ;;
+              *)          cp "$f" dist/ ;;
+            esac
+          done
           ls -lh dist/
+
+      - name: Extract the binary for inspection
+        run: dpkg-deb -x dist/mympd_*_${{ matrix.arch }}.deb extract/
+
+      - name: Check binary
+        uses: b0bbywan/odio-ci/actions/check-binary@v1.0.3
+        with:
+          binary: extract/usr/bin/mympd
+          arch: ${{ matrix.arch }}
+          # bookworm baseline, so the package installs on Pi OS bookworm and
+          # trixie. Headroom is thin: the amd64 builder base is debian:trixie.
+          glibc_max: '2.36'
+          expect_cpu_arch: ${{ matrix.expect_cpu_arch }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -92,40 +119,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # `needs: build` waits for the whole matrix, so the release is published once
+  # with every arch — which immutable releases also require.
   release:
-    name: Create GitHub Release
+    name: Release and reindex
     needs: build
-    runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-
-    steps:
-      - name: Download all packages
-        uses: actions/download-artifact@v8
-        with:
-          pattern: mympd-*-deb
-          merge-multiple: true
-          path: dist/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*.deb
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
-
-  notify-apt-repo:
-    name: Trigger APT repo update
-    needs: release
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - name: Trigger apt-repo rebuild
-        uses: peter-evans/repository-dispatch@v4
-        with:
-          token: ${{ secrets.APT_REPO_TOKEN }}
-          repository: b0bbywan/odio-apt-repo
-          event-type: release-published
-          client-payload: '{"repo": "${{ github.repository }}", "tag": "${{ github.ref_name }}"}'
+    uses: b0bbywan/odio-ci/.github/workflows/release.yml@v1.0.3
+    with:
+      artifact_pattern: mympd-*-deb
+    secrets:
+      apt_repo_token: ${{ secrets.APT_REPO_TOKEN }}
