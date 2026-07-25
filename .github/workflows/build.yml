@@ -52,7 +52,7 @@ jobs:
           upstream_tag: ${{ github.event.inputs.upstream_tag }}
 
       - name: Checkout upstream myMPD
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: jcorporation/myMPD
           ref: ${{ steps.upstream.outputs.upstream_tag }}
