@@ -84,14 +84,20 @@ jobs:
               ./build.sh pkgdebian
             '
 
+      # build.sh emits mympd_* and mympd-dbgsym_*; the debug symbols are not
+      # published. A loop rather than a narrower glob so a future subpackage
+      # shows up in the log instead of vanishing silently.
       - name: Collect package
         run: |
           mkdir -p dist
-          cp package/mympd*_${{ matrix.arch }}.deb dist/
+          for f in package/mympd*_${{ matrix.arch }}.deb; do
+            case "$(basename "$f")" in
+              *-dbgsym_*) echo "skipping $(basename "$f") — debug symbols are not published" ;;
+              *)          cp "$f" dist/ ;;
+            esac
+          done
           ls -lh dist/
 
-      # The glob above also picks up mympd-dbgsym_*, which is why this extracts
-      # mympd_* specifically.
       - name: Extract the binary for inspection
         run: dpkg-deb -x dist/mympd_*_${{ matrix.arch }}.deb extract/
 
