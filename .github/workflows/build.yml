@@ -119,11 +119,60 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # GPL-3.0 §6(d): the corresponding source ships next to the binaries rather
+  # than relying on upstream keeping its tags. myMPD is built unmodified and
+  # pkgdebian fetches nothing outside the tree (no submodules, no
+  # export-ignore), so `git archive` of the tag is the complete source.
+  # Output goes to RUNNER_TEMP: upstream has its own dist/ (vendored libs).
+  source:
+    name: Source archive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve upstream tag
+        id: upstream
+        uses: b0bbywan/odio-ci/actions/resolve-version@v1.0.3
+        with:
+          upstream_repo: jcorporation/myMPD
+          upstream_tag: ${{ github.event.inputs.upstream_tag }}
+
+      - name: Checkout upstream myMPD
+        uses: actions/checkout@v7
+        with:
+          repository: jcorporation/myMPD
+          ref: ${{ steps.upstream.outputs.upstream_tag }}
+
+      - name: Archive source and write release notes
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          ver="${UPSTREAM_TAG#v}"
+          commit="$(git rev-parse HEAD)"
+          out="${RUNNER_TEMP}/source"
+          mkdir -p "${out}"
+          git archive --format=tar.gz --prefix="myMPD-${ver}/" \
+            -o "${out}/myMPD-${ver}.tar.gz" HEAD
+          cat > "${out}/notes.md" <<EOF
+          ## Source
+
+          These packages are built unmodified from myMPD [\`${UPSTREAM_TAG}\`](https://github.com/jcorporation/myMPD/tree/${commit}) (commit \`${commit}\`), licensed GPL-3.0-or-later. The attached \`myMPD-${ver}.tar.gz\` is that tree (\`git archive\`), built with \`./build.sh pkgdebian\`. The build environment is [\`docker/builder.Dockerfile\`](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docker/builder.Dockerfile) and [\`.github/workflows/build.yml\`](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/.github/workflows/build.yml) in this repository.
+          EOF
+          ls -lh "${out}"
+
+      # Named so it stays out of the release's mympd-*-deb pattern.
+      - name: Upload source
+        uses: actions/upload-artifact@v7
+        with:
+          name: mympd-source
+          path: ${{ runner.temp }}/source/
+          if-no-files-found: error
+          retention-days: 7
+
   # `needs: build` waits for the whole matrix, so the release is published once
   # with every arch — which immutable releases also require.
   release:
     name: Release and reindex
-    needs: build
+    needs: [build, source]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -132,3 +181,33 @@ jobs:
       artifact_pattern: mympd-*-deb
     secrets:
       apt_repo_token: ${{ secrets.APT_REPO_TOKEN }}
+
+  # The reusable release only attaches .debs. Uploading afterwards rules out
+  # immutable releases for this repo, as in odio-upmpdcli.
+  attach-source:
+    name: Attach source
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v8
+        with:
+          name: mympd-source
+          path: dist
+
+      # Appends to the generated notes; skipped on a rerun so the section is
+      # not duplicated.
+      - name: Attach source and add it to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz --clobber
+          body="$(gh release view "${GITHUB_REF_NAME}" --json body --jq .body)"
+          if ! grep -q '^## Source$' <<<"${body}"; then
+            printf '%s\n\n%s\n' "${body}" "$(cat dist/notes.md)" > body.md
+            gh release edit "${GITHUB_REF_NAME}" --notes-file body.md
+          fi

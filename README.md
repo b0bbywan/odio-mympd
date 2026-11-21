@@ -6,7 +6,7 @@ Build pipeline that produces multi-arch Debian packages of
 
 This is **not a fork** — no source code is vendored here. The CI clones
 the upstream tag, builds it inside per-arch builder images, and publishes
-`.deb` artifacts as a GitHub Release.
+the `.deb` artifacts with the matching source archive as a GitHub Release.
 
 ## Architectures
 
@@ -43,9 +43,13 @@ or on demand:
 gh workflow run build-images.yml
 ```
 
-## License
+## Source and licenses
+
+The produced packages contain compiled myMPD, which is licensed
+[GPL-3.0-or-later](https://github.com/jcorporation/myMPD/blob/master/LICENSE.md).
+myMPD is built unmodified, and each release attaches the corresponding
+source: `myMPD-<version>.tar.gz`, a `git archive` of the upstream tag, with
+the exact commit recorded in the release notes.
 
 The build scripts and Dockerfile in this repo are licensed under the
-[MIT License](LICENSE). The produced packages contain compiled myMPD,
-which is licensed
-[GPL-3.0-or-later](https://github.com/jcorporation/myMPD/blob/master/LICENSE.md).
+[MIT License](LICENSE); it does not cover the produced packages.
